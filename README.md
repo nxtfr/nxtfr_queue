@@ -1,2 +1,9 @@
-# nxtfr_queue
-Nextgen Game Framework Queue System 
+nxtfr_queue
+=====
+
+An OTP application
+
+Build
+-----
+
+    $ rebar3 compile

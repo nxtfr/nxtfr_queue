@@ -1,0 +1,19 @@
+{application, nxtfr_queue,
+ [{description, "Nextgen Framework Queue Server"},
+  {vsn, "0.1.0"},
+  {registered, [nxtfr_queue]},
+  {mod, {nxtfr_queue_app, []}},
+  {applications,
+   [kernel,
+    stdlib
+   ]},
+  {env,[]},
+  {modules, [
+    nxtfr_queue,
+    nxtfr_queue_app,
+    nxtfr_queue_sup
+  ]},
+
+  {licenses, ["MIT License"]},
+  {links, []}
+ ]}.
