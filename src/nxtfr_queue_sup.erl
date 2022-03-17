@@ -4,7 +4,7 @@
 %%%-------------------------------------------------------------------
 
 -module(nxtfr_queue_sup).
-
+-author("christian@flodihn.se").
 -behaviour(supervisor).
 
 -export([start_link/0]).
@@ -23,7 +23,7 @@ init([]) ->
 
     NxtfrQueue = #{
         id => nxtfr_queue,
-        start => {nxtfr_queue, start_link, [10]},
+        start => {nxtfr_queue, start_link, [1000000]},
         type => worker},
 
     ChildSpecs = [NxtfrQueue],

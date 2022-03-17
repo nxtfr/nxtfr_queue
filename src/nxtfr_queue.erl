@@ -7,31 +7,15 @@
     link
     ]).
 
-%% server state
--record(state, {
-    limit :: integer(),
-    tail_pid :: pid(),
-    head_pid :: pid(),
-    queue_size :: integer
-    }).
--type state() :: #state{}.
-
-%% queue process tate
--record(queue_process_state, {
-    ref :: reference(),
-    forward_pid :: pid(),
-    back_pid :: pid()
-    }).
--type queue_process_state() :: #queue_process_state{}.
-
 %% External exports
 -export([
     start_link/1,
-    dev/0,
-    chain/1,
+    dev/1,
+    ch/0,
     info/0,
+    chain/0,
     set_limit/1,
-    queue/0,
+    queue/1,
     dequeue/1
     ]).
 
@@ -40,33 +24,58 @@
     init/1, handle_call/3, handle_cast/2, handle_info/2, code_change/3, terminate/2
     ]).
 
-%% Internal exports
--export([
-    queue_process_loop/1
-    ]).
+%% Includes
+-include("nxtfr_queue.hrl").
 
-dev() ->
+dev(Num) ->
     application:start(nxtfr_queue),
-    {ok, HeadPid, _} = nxtfr_queue:queue(),
-    HeadPid.
+    spawn_procs(Num).
 
-chain(H) ->
-    H ! chain.
+ch() ->
+    chain(),
+    wait_for_queue_pos().
 
+wait_for_queue_pos() ->
+    receive
+        {queue_position, QueuePos} ->
+            io:format("queue_position: ~p.~n", [QueuePos]),
+            wait_for_queue_pos();
+        Other ->
+            io:format("unknown msg: ~p.~n", [Other])
+    after 2000 ->
+        done
+    end.
+
+spawn_procs(0) ->
+    done;
+spawn_procs(Num) ->
+    nxtfr_queue:queue(self()),
+    spawn_procs(Num -1).
+
+-spec start_link(Limit :: integer()) -> ok.
 start_link(Limit) ->
     gen_server:start_link({global, ?MODULE}, ?MODULE, [Limit], []).
 
 -spec info() -> ok.
 info() ->
-    gen_server:call({global, ?MODULE}, info).
+    Info = gen_server:call({global, ?MODULE}, info),
+    io:format("QueueSize: ~p/~p.~n HeadPid: ~p.~n, TailPid: ~p.~n", [
+        Info#state.queue_size,
+        Info#state.limit,
+        Info#state.head_pid,
+        Info#state.tail_pid]).
+
+-spec chain() -> ok.
+chain() ->
+    gen_server:call({global, ?MODULE}, chain).
 
 -spec set_limit(Limit :: integer()) -> ok.
 set_limit(Limit) ->
     gen_server:call({global, ?MODULE}, {set_limit, Limit}).
 
--spec queue() -> {ok, QueuePid :: pid(), QueueNumber :: integer()}.
-queue() ->
-    gen_server:call({global, ?MODULE}, queue).
+-spec queue(ConnectionPid :: pid()) -> {ok, QueuePid :: pid(), QueueNumber :: integer()}.
+queue(ConnectionPid) ->
+    gen_server:call({global, ?MODULE}, {queue, ConnectionPid}).
 
 -spec dequeue(QueuePid :: pid()) -> ok.
 dequeue(QueuePid) ->
@@ -74,6 +83,8 @@ dequeue(QueuePid) ->
 
 -spec init([]) -> {ok, state()}.
 init([Limit]) ->
+    application:ensure_started(nxtfr_event),
+    nxtfr_event:add_global_handler(nxtfr_queue_event, nxtfr_queue_event_handler),
     {ok, #state{limit = Limit, queue_size = 0}}.
 
 handle_call(info, _From, State) ->
@@ -83,19 +94,20 @@ handle_call({set_limit, Limit}, _From, State) ->
     {reply, ok, State#state{limit = Limit}};
 
 handle_call(queue, _From, #state{limit = Limit, queue_size = QueueSize} = State) when QueueSize >= Limit ->
-    {reply, {error, queue_limit}, State};
+    {reply, {error, queue_full}, State};
     
-% Match most frequent case when there is an existing head.
-handle_call(queue, _From, #state{
+%% Match most frequent case when there is an existing head.
+handle_call({queue, ConnectionPid}, _From, #state{
         queue_size = QueueSize,
         tail_pid = TailPid,
         head_pid = HeadPid} = State) when is_pid(HeadPid) ->
     RequestPid = self(),
     QueueState = #queue_process_state {
         ref = make_ref(),
+        connection_pid = ConnectionPid,
         forward_pid = TailPid
     },
-    QueuePid = spawn_opt(?MODULE, queue_process_loop, [QueueState], ?QUEUE_PROCESS_OPTIONS),
+    QueuePid = spawn_opt(nxtfr_queue_process, loop, [QueueState], ?QUEUE_PROCESS_OPTIONS),
     NewQueueSize = QueueSize + 1,
     ok = send_if_pid_valid(TailPid, {set_back_pid, QueuePid, RequestPid}, set_back_pid_ok),
     {reply, {ok, QueuePid, NewQueueSize}, State#state{
@@ -103,14 +115,15 @@ handle_call(queue, _From, #state{
         tail_pid = QueuePid}};
 
 %% Match edge case when we are the first to be queued into an empty queue.
-handle_call(queue, _From, #state{
+handle_call({queue, ConnectionPid}, _From, #state{
         head_pid = undefined} = State) ->
     QueueState = #queue_process_state {
         ref = make_ref(),
+        connection_pid = ConnectionPid,
         forward_pid = undefined,
         back_pid = undefined
     },
-    QueuePid = spawn_opt(?MODULE, queue_process_loop, [QueueState], ?QUEUE_PROCESS_OPTIONS),
+    QueuePid = spawn_opt(nxtfr_queue_process, loop, [QueueState], ?QUEUE_PROCESS_OPTIONS),
     NewQueueSize = 1,
     {reply, {ok, QueuePid, NewQueueSize}, State#state{
         queue_size = NewQueueSize,
@@ -151,7 +164,6 @@ handle_call({dequeue, HeadPid}, _From, #state{queue_size = QueueSize, head_pid =
     receive 
         {ok, QueueProcessState} ->
             NewHeadPid = QueueProcessState#queue_process_state.back_pid,
-            io:format("Dequeue head pid detected, new head is ~p.~n", [NewHeadPid]),
             case dequeue_process(HeadPid) of
                 ok ->
                     NewQueueSize = QueueSize - 1,
@@ -163,6 +175,10 @@ handle_call({dequeue, HeadPid}, _From, #state{queue_size = QueueSize, head_pid =
         2000 ->
             {reply, {error, timeout}, State}
     end;
+
+handle_call(chain, _From, #state{head_pid = HeadPid} = State) ->
+    HeadPid ! {chain, 0},
+    {reply, ok, State};
 
 handle_call(Call, _From, State) ->
     error_logger:error_report([{undefined_call, Call}]),
@@ -180,6 +196,7 @@ code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
 terminate(_Reason, _State) ->
+    nxtfr_event:delete_global_handler(nxtfr_queue, nxtfr_queue_event_handler),
     ok.
 
 send_if_pid_valid(Pid, Message, WaitForAtom) when is_pid(Pid) ->
@@ -214,33 +231,5 @@ dequeue_process(QueuePid) ->
     after
         2000 ->
             {error, timeout}
-    end.
-
-queue_process_loop(QueueProcessState) ->
-    receive
-        {dequeue, RequestPid} ->
-            RequestPid ! {dequeued, QueueProcessState};
-        chain ->
-            io:format("~p.~n", [self()]),
-            BackPid = QueueProcessState#queue_process_state.back_pid,
-            case BackPid of
-                undefined ->
-                    io:format("Reached tail.~n", []);
-                BackPid ->
-                    BackPid ! chain
-            end,
-            ?MODULE:queue_process_loop(QueueProcessState);
-        {get_queue_process_state, RequestPid} ->
-            RequestPid ! {ok, QueueProcessState},
-            ?MODULE:queue_process_loop(QueueProcessState);
-        {set_forward_pid, ForwardPid, RequestPid} ->
-            RequestPid ! set_forward_pid_ok,
-            ?MODULE:queue_process_loop(QueueProcessState#queue_process_state{forward_pid = ForwardPid});
-        {set_back_pid, BackPid, RequestPid} ->
-            RequestPid ! set_back_pid_ok,
-            ?MODULE:queue_process_loop(QueueProcessState#queue_process_state{back_pid = BackPid})
-    after 
-        60000 ->
-            ?MODULE:queue_process_loop(QueueProcessState)
     end.
 

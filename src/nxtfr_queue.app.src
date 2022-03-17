@@ -5,11 +5,15 @@
   {mod, {nxtfr_queue_app, []}},
   {applications,
    [kernel,
-    stdlib
+    stdlib,
+    sasl,
+    nxtfr_event
    ]},
   {env,[]},
   {modules, [
     nxtfr_queue,
+    nxtfr_queue_process,
+    nxtfr_queue_event_handler,
     nxtfr_queue_app,
     nxtfr_queue_sup
   ]},
